@@ -13,7 +13,7 @@
         "initialMessages": "Bonjour! 👋 Comment puis-je vous aider?\nJe suis l'assistant du Cabinet Dentaire d'Évry.",
         "options": {
           "title": "Cabinet Dentaire - Chatbot Évry",
-          "subtitle": "Assistant virtuel disponible Lun-Ven 9h-18h, Sam 9h-12h",
+          "subtitle": "Assistant virtuel - Lun-Ven 9h-18h, Sam 9h-12h",
           "inputPlaceholder": "Tapez votre message...",
           "loadPreviousSession": "off"
         }
@@ -51,65 +51,48 @@
     },
     {
       "id": "a1b2c3d4-3333-3333-3333-000000000003",
-      "name": "Code - Préparer Prompt Claude",
+      "name": "Code - Formater FAQ",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [680, 300],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// Récupérer le message patient du Chat Trigger\nconst userMessage = $('Chat Trigger').first().json.chatInput;\n\n// Récupérer les données FAQ de Google Sheets\nconst faqItems = $('Google Sheets - Lire FAQ').all();\n\n// Formater la FAQ comme contexte pour Claude\nlet faqContext = 'BASE DE DONNÉES FAQ DU CABINET:\\n\\n';\n\nfor (const item of faqItems) {\n  const row = item.json;\n  const categorie = row['Catégorie'] || row['categorie'] || '';\n  const question = row['Question'] || row['question'] || '';\n  const reponse = row['Réponse'] || row['reponse'] || '';\n  \n  if (categorie && question && reponse) {\n    faqContext += `Catégorie: ${categorie}\\n`;\n    faqContext += `Question: ${question}\\n`;\n    faqContext += `Réponse: ${reponse}\\n\\n`;\n  }\n}\n\nreturn [\n  {\n    json: {\n      userMessage,\n      faqContext,\n      fullPrompt: `${faqContext}\\nMESSAGE PATIENT: ${userMessage}`\n    }\n  }\n];"
+        "jsCode": "// Récupérer toutes les lignes FAQ de Google Sheets\nconst faqItems = $('Google Sheets - Lire FAQ').all();\n\n// Construire le contexte FAQ formaté\nlet faqContext = 'BASE DE DONNÉES FAQ DU CABINET:\\n\\n';\n\nfor (const item of faqItems) {\n  const row = item.json;\n  const categorie = row['Catégorie'] || row['categorie'] || '';\n  const question  = row['Question']  || row['question']  || '';\n  const reponse   = row['Réponse']   || row['reponse']   || '';\n\n  if (categorie && question && reponse) {\n    faqContext += `Catégorie: ${categorie}\\n`;\n    faqContext += `Question: ${question}\\n`;\n    faqContext += `Réponse: ${reponse}\\n\\n`;\n  }\n}\n\nreturn [{ json: { faqContext } }];"
       }
     },
     {
       "id": "a1b2c3d4-4444-4444-4444-000000000004",
-      "name": "Anthropic API - Claude AI",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
       "position": [900, 300],
       "parameters": {
-        "method": "POST",
-        "url": "https://api.anthropic.com/v1/messages",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "anthropic-version",
-              "value": "2023-06-01"
-            },
-            {
-              "name": "content-type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "contentType": "json",
-        "body": {
-          "model": "claude-3-5-sonnet-20241022",
-          "max_tokens": 500,
-          "temperature": 0.7,
-          "system": "Tu es un assistant dentaire pour le Cabinet Dentaire à Évry.\n\n📌 CABINET INFO:\n- Téléphone: 06-98-70-77-21\n- Adresse: 9 Rue Léopold Sédar Senghor, 91000 Évry\n- Horaires: Lun-Ven 9h-18h, Sam 9h-12h, Dim Fermé\n- Transports: RER D Gare Évry (3min), Tram 12, Bus 4201/4202/4206/4212/4504\n\n🎯 JOB:\n1. Réponds aux questions (utilise UNIQUEMENT la base de données fournie)\n2. Si patient dit \"mal/urgence/douleur\" → \"Appelez 06-98-70-77-21 IMMÉDIATEMENT\"\n3. Si patient veut RDV → Pose 3 questions:\n   Q1: \"Quel type de visite?\" (détartrage/urgence/implant/blanchiment/consultation)\n   Q2: \"Quel jour et heure?\"\n   Q3: \"Votre nom et téléphone?\"\n4. Confirme: \"Parfait! RDV [TYPE] le [JOUR] à [HEURE] confirmé!\"\n\nRÈGLES:\n- Max 150 mots par réponse\n- Français naturel, pas robotique\n- JAMAIS inventer d'infos\n- Si pas sûr: \"Je vais vérifier\"\n- Sois empathique\n\nFORMAT DE RÉPONSE OBLIGATOIRE:\nToujours terminer ta réponse avec ce bloc (même si pas de réservation - mettre null):\n\n---BOOKING---\ntype: [type de visite ou null]\ndate: [date mentionnée ou null]\ntime: [heure mentionnée ou null]\nname: [nom patient ou null]\nphone: [téléphone patient ou null]\n---BOOKING---",
-          "messages": [
-            {
-              "role": "user",
-              "content": "={{ $json.fullPrompt }}"
-            }
-          ]
-        },
+        "agent": "conversationalAgent",
+        "promptType": "define",
+        "text": "={{ $('Chat Trigger').item.json.chatInput }}",
+        "hasOutputParser": false,
         "options": {
-          "response": {
-            "response": {
-              "fullResponse": false
-            }
-          }
+          "systemMessage": "=Tu es un assistant dentaire pour le Cabinet Dentaire à Évry.\n\n📌 CABINET INFO:\n- Téléphone: 06-98-70-77-21\n- Adresse: 9 Rue Léopold Sédar Senghor, 91000 Évry\n- Horaires: Lun-Ven 9h-18h, Sam 9h-12h, Dim Fermé\n- Transports: RER D Gare Évry (3min), Tram 12, Bus 4201/4202/4206/4212/4504\n\n🎯 JOB:\n1. Réponds aux questions en utilisant UNIQUEMENT la base de données ci-dessous\n2. Si patient dit \"mal/urgence/douleur\" → réponds UNIQUEMENT: \"Appelez 06-98-70-77-21 IMMÉDIATEMENT\"\n3. Si patient veut un RDV → pose ces 3 questions une par une:\n   Q1: \"Quel type de visite?\" (détartrage / urgence / implant / blanchiment / consultation)\n   Q2: \"Quel jour et heure?\"\n   Q3: \"Votre nom et téléphone?\"\n4. Quand tu as les 3 réponses, confirme: \"Parfait! RDV [TYPE] le [JOUR] à [HEURE] confirmé!\"\n\nRÈGLES:\n- Max 150 mots par réponse\n- Français naturel, jamais robotique\n- JAMAIS inventer d'infos\n- Si pas sûr: \"Je vais vérifier\"\n- Sois empathique et professionnel\n\nFORMAT DE RÉPONSE OBLIGATOIRE:\nTermine TOUJOURS ta réponse avec ce bloc (mettre null si pas de RDV):\n\n---BOOKING---\ntype: [type de visite ou null]\ndate: [date mentionnée ou null]\ntime: [heure mentionnée ou null]\nname: [nom patient ou null]\nphone: [téléphone patient ou null]\n---BOOKING---\n\n{{ $('Code - Formater FAQ').item.json.faqContext }}"
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-4444-4444-AAAA-000000000010",
+      "name": "Anthropic Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [900, 520],
+      "parameters": {
+        "model": "claude-3-5-sonnet-20241022",
+        "options": {
+          "temperature": 0.7,
+          "maxTokens": 500
         }
       },
       "credentials": {
-        "httpHeaderAuth": {
+        "anthropicApi": {
           "id": "ANTHROPIC_CREDENTIAL_ID",
-          "name": "Anthropic API Key"
+          "name": "Anthropic account"
         }
       }
     },
@@ -121,7 +104,7 @@
       "position": [1120, 300],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// Récupérer la réponse de l'API Anthropic\nconst anthropicData = $input.first().json;\n\n// Extraire le texte de la réponse Claude\nlet fullText = '';\nif (anthropicData.content && anthropicData.content[0] && anthropicData.content[0].text) {\n  fullText = anthropicData.content[0].text;\n} else if (typeof anthropicData === 'string') {\n  fullText = anthropicData;\n} else {\n  fullText = JSON.stringify(anthropicData);\n}\n\n// Séparer la réponse naturelle du bloc BOOKING\nlet chatResponse = fullText;\nlet hasBooking = false;\nlet booking = null;\n\n// Regex pour extraire le bloc ---BOOKING---\nconst bookingMatch = fullText.match(/---BOOKING---([\\s\\S]*?)---BOOKING---/);\n\nif (bookingMatch) {\n  // Réponse texte = tout avant le premier ---BOOKING---\n  chatResponse = fullText.split('---BOOKING---')[0].trim();\n  const bookingText = bookingMatch[1];\n  \n  // Parser chaque champ\n  const typeMatch = bookingText.match(/type:\\s*(.+)/);\n  const dateMatch = bookingText.match(/date:\\s*(.+)/);\n  const timeMatch = bookingText.match(/time:\\s*(.+)/);\n  const nameMatch = bookingText.match(/name:\\s*(.+)/);\n  const phoneMatch = bookingText.match(/phone:\\s*(.+)/);\n  \n  const bookingType = typeMatch ? typeMatch[1].trim() : 'null';\n  \n  // Vérifier si c'est une vraie réservation (pas null)\n  if (bookingType && bookingType.toLowerCase() !== 'null' && bookingType !== '') {\n    hasBooking = true;\n    booking = {\n      type: bookingType,\n      date: dateMatch ? dateMatch[1].trim() : '',\n      time: timeMatch ? timeMatch[1].trim() : '',\n      name: nameMatch ? nameMatch[1].trim() : 'Patient',\n      phone: phoneMatch ? phoneMatch[1].trim() : 'Non renseigné'\n    };\n  }\n}\n\n// Retourner les données structurées\nreturn [\n  {\n    json: {\n      output: chatResponse,       // Réponse pour le chat (clé 'output' pour Chat Trigger)\n      chatResponse,               // Même chose avec autre clé\n      hasBooking,\n      booking,\n      // Aplatir les données booking pour faciliter l'accès dans les nodes suivants\n      bookingType: booking ? booking.type : null,\n      bookingDate: booking ? booking.date : null,\n      bookingTime: booking ? booking.time : null,\n      bookingName: booking ? booking.name : null,\n      bookingPhone: booking ? booking.phone : null\n    }\n  }\n];"
+        "jsCode": "// Récupérer la sortie de l'AI Agent\nconst agentOutput = $input.first().json;\n\n// L'AI Agent retourne le texte dans 'output'\nconst fullText = agentOutput.output || agentOutput.text || JSON.stringify(agentOutput);\n\n// Séparer la réponse naturelle du bloc BOOKING\nlet chatResponse = fullText;\nlet hasBooking = false;\nlet booking = null;\n\n// Regex pour extraire le bloc ---BOOKING---\nconst bookingMatch = fullText.match(/---BOOKING---([\\s\\S]*?)---BOOKING---/);\n\nif (bookingMatch) {\n  // Réponse texte = tout avant le premier ---BOOKING---\n  chatResponse = fullText.split('---BOOKING---')[0].trim();\n  const bookingText = bookingMatch[1];\n\n  const typeMatch  = bookingText.match(/type:\\s*(.+)/);\n  const dateMatch  = bookingText.match(/date:\\s*(.+)/);\n  const timeMatch  = bookingText.match(/time:\\s*(.+)/);\n  const nameMatch  = bookingText.match(/name:\\s*(.+)/);\n  const phoneMatch = bookingText.match(/phone:\\s*(.+)/);\n\n  const bookingType = typeMatch ? typeMatch[1].trim() : 'null';\n\n  if (bookingType && bookingType.toLowerCase() !== 'null' && bookingType !== '') {\n    hasBooking = true;\n    booking = {\n      type:  bookingType,\n      date:  dateMatch  ? dateMatch[1].trim()  : '',\n      time:  timeMatch  ? timeMatch[1].trim()  : '',\n      name:  nameMatch  ? nameMatch[1].trim()  : 'Patient',\n      phone: phoneMatch ? phoneMatch[1].trim() : 'Non renseigné'\n    };\n  }\n}\n\nreturn [\n  {\n    json: {\n      output: chatResponse,\n      chatResponse,\n      hasBooking,\n      booking,\n      bookingType:  booking ? booking.type  : null,\n      bookingDate:  booking ? booking.date  : null,\n      bookingTime:  booking ? booking.time  : null,\n      bookingName:  booking ? booking.name  : null,\n      bookingPhone: booking ? booking.phone : null\n    }\n  }\n];"
       }
     },
     {
@@ -158,7 +141,7 @@
       "name": "Google Calendar - Créer RDV",
       "type": "n8n-nodes-base.googleCalendar",
       "typeVersion": 1.3,
-      "position": [1560, 160],
+      "position": [1560, 140],
       "parameters": {
         "operation": "create",
         "calendar": {
@@ -171,7 +154,7 @@
         "end": "={{ $json.bookingDate + ' ' + $json.bookingTime }}",
         "additionalFields": {
           "summary": "=RDV: {{ $json.bookingType }} - {{ $json.bookingName }}",
-          "description": "Cabinet Dentaire Évry\nTéléphone: 06-98-70-77-21\nAdresse: 9 Rue Léopold Sédar Senghor, 91000 Évry\n\n👤 Patient: {{ $json.bookingName }}\n📞 Téléphone patient: {{ $json.bookingPhone }}\n🦷 Type: {{ $json.bookingType }}\n\nTransports:\n- RER D: Gare Évry (3 min marche)\n- Tram 12: Arrêt Évry-Courcouronnes\n- Bus: 4201, 4202, 4206, 4212, 4504\n\n⚠️ Confirmez ou annulez 24h avant.\nApportez votre assurance et pièce d'identité.",
+          "description": "=Cabinet Dentaire Évry\nTéléphone: 06-98-70-77-21\nAdresse: 9 Rue Léopold Sédar Senghor, 91000 Évry\n\n👤 Patient: {{ $json.bookingName }}\n📞 Téléphone patient: {{ $json.bookingPhone }}\n🦷 Type: {{ $json.bookingType }}\n\nTransports:\n- RER D: Gare Évry (3 min marche)\n- Tram 12: Arrêt Évry-Courcouronnes\n- Bus: 4201, 4202, 4206, 4212, 4504\n\n⚠️ Confirmez ou annulez 24h avant.\nApportez votre assurance et pièce d'identité.",
           "colorId": "3",
           "guestsCanInviteOthers": false,
           "guestsCanSeeOtherGuests": false
@@ -189,13 +172,13 @@
       "name": "Gmail - Confirmation Patient",
       "type": "n8n-nodes-base.gmail",
       "typeVersion": 2.1,
-      "position": [1560, 340],
+      "position": [1560, 320],
       "parameters": {
         "operation": "send",
         "sendTo": "renaissanceitech@gmail.com",
-        "subject": "=✅ Confirmation: Votre rendez-vous à Évry - {{ $json.bookingDate }} {{ $json.bookingTime }}",
+        "subject": "=✅ Confirmation RDV - {{ $json.bookingType }} - {{ $json.bookingDate }} {{ $json.bookingTime }}",
         "emailType": "html",
-        "message": "=<!DOCTYPE html>\n<html>\n<head>\n  <style>\n    body { font-family: Arial, sans-serif; color: #333; line-height: 1.6; }\n    .container { max-width: 600px; margin: 0 auto; padding: 20px; }\n    .header { background: #2196F3; color: white; padding: 20px; border-radius: 8px; text-align: center; }\n    .content { background: #f9f9f9; padding: 25px; margin: 20px 0; border-radius: 8px; border-left: 4px solid #2196F3; }\n    .detail-row { margin: 12px 0; display: flex; align-items: flex-start; }\n    .detail-label { font-weight: bold; width: 150px; flex-shrink: 0; }\n    .footer { text-align: center; color: #999; font-size: 12px; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 20px; }\n    .important { background: #fff3cd; border: 1px solid #ffc107; padding: 15px; border-radius: 5px; margin: 15px 0; }\n  </style>\n</head>\n<body>\n  <div class=\"container\">\n    <div class=\"header\">\n      <h1>✅ Votre rendez-vous est confirmé!</h1>\n    </div>\n    <div class=\"content\">\n      <p>Bonjour <strong>{{ $json.bookingName }}</strong>,</p>\n      <p>Merci d'avoir choisi le Cabinet Dentaire d'Évry! Voici les détails de votre rendez-vous:</p>\n      <div class=\"detail-row\">\n        <span class=\"detail-label\">🦷 Type:</span>\n        <span><strong>{{ $json.bookingType }}</strong></span>\n      </div>\n      <div class=\"detail-row\">\n        <span class=\"detail-label\">📅 Date:</span>\n        <span><strong>{{ $json.bookingDate }}</strong></span>\n      </div>\n      <div class=\"detail-row\">\n        <span class=\"detail-label\">⏰ Heure:</span>\n        <span><strong>{{ $json.bookingTime }}</strong></span>\n      </div>\n      <div class=\"detail-row\">\n        <span class=\"detail-label\">📍 Adresse:</span>\n        <span><strong>9 Rue Léopold Sédar Senghor<br>91000 Évry</strong></span>\n      </div>\n      <div class=\"detail-row\">\n        <span class=\"detail-label\">📞 Téléphone:</span>\n        <span><strong>06-98-70-77-21</strong></span>\n      </div>\n      <div class=\"detail-row\">\n        <span class=\"detail-label\">🚌 Accès:</span>\n        <span><strong>RER D: Gare Évry (3 min marche)<br>Tram 12: Arrêt Évry-Courcouronnes<br>Bus: 4201, 4202, 4206, 4212, 4504</strong></span>\n      </div>\n      <div class=\"important\">\n        <h3>⚠️ Important:</h3>\n        <ul>\n          <li>Arrivez <strong>10 minutes avant</strong> votre rendez-vous</li>\n          <li>En cas d'annulation, prévenez-nous <strong>au moins 24h avant</strong></li>\n          <li>Apportez votre <strong>carte d'assurance</strong> (si applicable)</li>\n          <li>Apportez votre <strong>pièce d'identité</strong></li>\n        </ul>\n      </div>\n      <p>Si vous avez des questions ou besoin de reprogrammer, appelez-nous au <strong>06-98-70-77-21</strong> ou répondez à cet email.</p>\n      <p>À très bientôt! 💚</p>\n      <p><em>L'équipe du Cabinet Dentaire Évry</em></p>\n    </div>\n    <div class=\"footer\">\n      <p>Cabinet Dentaire Évry</p>\n      <p>9 Rue Léopold Sédar Senghor, 91000 Évry</p>\n      <p>Téléphone: 06-98-70-77-21</p>\n      <p>© 2024 Cabinet Dentaire. Tous droits réservés.</p>\n    </div>\n  </div>\n</body>\n</html>",
+        "message": "=<!DOCTYPE html>\n<html>\n<head>\n  <style>\n    body { font-family: Arial, sans-serif; color: #333; line-height: 1.6; }\n    .container { max-width: 600px; margin: 0 auto; padding: 20px; }\n    .header { background: #2196F3; color: white; padding: 20px; border-radius: 8px; text-align: center; }\n    .content { background: #f9f9f9; padding: 25px; margin: 20px 0; border-radius: 8px; border-left: 4px solid #2196F3; }\n    .detail-row { margin: 12px 0; display: flex; align-items: flex-start; }\n    .detail-label { font-weight: bold; width: 150px; flex-shrink: 0; }\n    .footer { text-align: center; color: #999; font-size: 12px; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 20px; }\n    .important { background: #fff3cd; border: 1px solid #ffc107; padding: 15px; border-radius: 5px; margin: 15px 0; }\n  </style>\n</head>\n<body>\n  <div class=\"container\">\n    <div class=\"header\"><h1>✅ Votre rendez-vous est confirmé!</h1></div>\n    <div class=\"content\">\n      <p>Bonjour <strong>{{ $json.bookingName }}</strong>,</p>\n      <p>Merci d'avoir choisi le Cabinet Dentaire d'Évry! Voici les détails:</p>\n      <div class=\"detail-row\"><span class=\"detail-label\">🦷 Type:</span><span><strong>{{ $json.bookingType }}</strong></span></div>\n      <div class=\"detail-row\"><span class=\"detail-label\">📅 Date:</span><span><strong>{{ $json.bookingDate }}</strong></span></div>\n      <div class=\"detail-row\"><span class=\"detail-label\">⏰ Heure:</span><span><strong>{{ $json.bookingTime }}</strong></span></div>\n      <div class=\"detail-row\"><span class=\"detail-label\">📍 Adresse:</span><span><strong>9 Rue Léopold Sédar Senghor<br>91000 Évry</strong></span></div>\n      <div class=\"detail-row\"><span class=\"detail-label\">📞 Téléphone:</span><span><strong>06-98-70-77-21</strong></span></div>\n      <div class=\"detail-row\"><span class=\"detail-label\">🚌 Accès:</span><span><strong>RER D: Gare Évry (3 min)<br>Tram 12: Évry-Courcouronnes<br>Bus: 4201, 4202, 4206, 4212, 4504</strong></span></div>\n      <div class=\"important\">\n        <h3>⚠️ Important:</h3>\n        <ul>\n          <li>Arrivez <strong>10 minutes avant</strong> votre RDV</li>\n          <li>Annulation: prévenez-nous <strong>24h avant</strong></li>\n          <li>Apportez votre <strong>carte d'assurance</strong></li>\n          <li>Apportez votre <strong>pièce d'identité</strong></li>\n        </ul>\n      </div>\n      <p>Questions? Appelez le <strong>06-98-70-77-21</strong></p>\n      <p>À très bientôt! 💚<br><em>L'équipe du Cabinet Dentaire Évry</em></p>\n    </div>\n    <div class=\"footer\">\n      <p>Cabinet Dentaire Évry | 9 Rue Léopold Sédar Senghor, 91000 Évry</p>\n      <p>Téléphone: 06-98-70-77-21 | © 2024 Cabinet Dentaire. Tous droits réservés.</p>\n    </div>\n  </div>\n</body>\n</html>",
         "options": {}
       },
       "credentials": {
@@ -210,7 +193,7 @@
       "name": "Slack - Notification Équipe",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
-      "position": [1560, 520],
+      "position": [1560, 500],
       "parameters": {
         "operation": "postMessage",
         "channel": {
@@ -248,25 +231,36 @@
       "main": [
         [
           {
-            "node": "Code - Préparer Prompt Claude",
+            "node": "Code - Formater FAQ",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Code - Préparer Prompt Claude": {
+    "Code - Formater FAQ": {
       "main": [
         [
           {
-            "node": "Anthropic API - Claude AI",
+            "node": "AI Agent",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Anthropic API - Claude AI": {
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
       "main": [
         [
           {
@@ -315,10 +309,9 @@
   "settings": {
     "executionOrder": "v1",
     "saveManualExecutions": true,
-    "callerPolicy": "workflowsFromSameOwner",
-    "errorWorkflow": ""
+    "callerPolicy": "workflowsFromSameOwner"
   },
-  "versionId": "1.0.0",
+  "versionId": "2.0.0",
   "meta": {
     "templateCredsSetupCompleted": false,
     "instanceId": "cabinet-dentaire-evry"
@@ -326,8 +319,6 @@
   "id": "cabinet-dentaire-chatbot-evry",
   "tags": [
     {
-      "createdAt": "2024-01-01T00:00:00.000Z",
-      "updatedAt": "2024-01-01T00:00:00.000Z",
       "id": "tag-cabinet-dentaire",
       "name": "Cabinet Dentaire"
     }
