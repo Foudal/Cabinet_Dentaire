@@ -2,7 +2,7 @@
   "name": "Cabinet Dentaire - Chatbot Évry",
   "nodes": [
     {
-      "id": "a1b2c3d4-1111-1111-1111-000000000001",
+      "id": "node-chat-trigger",
       "name": "Chat Trigger",
       "type": "@n8n/n8n-nodes-langchain.chatTrigger",
       "typeVersion": 1.1,
@@ -15,16 +15,221 @@
           "title": "Cabinet Dentaire - Chatbot Évry",
           "subtitle": "Assistant virtuel - Lun-Ven 9h-18h, Sam 9h-12h",
           "inputPlaceholder": "Tapez votre message...",
-          "loadPreviousSession": "off"
+          "loadPreviousSession": "memory"
         }
       }
     },
     {
-      "id": "a1b2c3d4-2222-2222-2222-000000000002",
-      "name": "Google Sheets - Lire FAQ",
+      "id": "node-ai-agent",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.9,
+      "position": [560, 300],
+      "parameters": {
+        "promptType": "auto",
+        "options": {
+          "systemMessage": "Tu es l'assistant virtuel du Cabinet Dentaire à Évry.\n\n📌 CABINET INFO:\n- Téléphone: 06-98-70-77-21\n- Adresse: 9 Rue Léopold Sédar Senghor, 91000 Évry\n- Horaires: Lun-Ven 9h-18h, Sam 9h-12h, Dim Fermé\n- Transports: RER D Gare Évry (3min), Tram 12, Bus 4201/4202/4206/4212/4504\n\n🎯 TES MISSIONS:\n1. Pour toute question sur le cabinet, APPELLE l'outil `consulter_faq` pour chercher dans la base de connaissance. Ne réponds JAMAIS sans avoir consulté la FAQ.\n2. Si le patient mentionne \"mal/urgence/douleur\" → réponds UNIQUEMENT: \"⚠️ Appelez le 06-98-70-77-21 IMMÉDIATEMENT pour une urgence.\"\n3. Pour une demande de RDV, collecte progressivement (UNE question à la fois, pas tout d'un coup) :\n   - Type de visite (détartrage / urgence / implant / blanchiment / consultation)\n   - Jour et heure souhaités (format JJ/MM/AAAA et HH:MM si possible)\n   - Nom complet et numéro de téléphone\n   - Une fois tout collecté, confirme et appelle l'outil `enregistrer_reservation`\n\n📋 RÈGLES STRICTES:\n- Max 100 mots par réponse\n- Français naturel et empathique\n- JAMAIS inventer d'informations - utiliser uniquement la FAQ\n- Si tu n'es pas sûr, dis: \"Je vais vérifier, un instant\" puis consulte la FAQ\n- Garde le contexte de la conversation (mémoire) pour ne pas redemander des infos déjà fournies\n\n📤 FORMAT DE RÉPONSE FINAL (OBLIGATOIRE) :\nTermine TOUJOURS chaque réponse avec ce bloc JSON (sur une seule ligne) :\n\n---BOOKING---{\"type\":null,\"date\":null,\"time\":null,\"name\":null,\"phone\":null,\"confirmed\":false}---BOOKING---\n\nQuand toutes les infos RDV sont collectées ET le patient confirme, remplis le JSON avec les valeurs et mets confirmed=true. Sinon mets confirmed=false avec les champs déjà collectés ou null."
+        }
+      }
+    },
+    {
+      "id": "node-anthropic-llm",
+      "name": "Anthropic Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [440, 520],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "claude-3-5-sonnet-20241022",
+          "mode": "list",
+          "cachedResultName": "Claude 3.5 Sonnet"
+        },
+        "options": {
+          "temperature": 0.5,
+          "maxTokensToSample": 700
+        }
+      },
+      "credentials": {
+        "anthropicApi": {
+          "id": "ANTHROPIC_CREDENTIAL_ID",
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "id": "node-memory",
+      "name": "Memory (Conversation)",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [600, 520],
+      "parameters": {
+        "sessionIdType": "fromInput",
+        "sessionKey": "={{ $('Chat Trigger').item.json.sessionId }}",
+        "contextWindowLength": 15
+      }
+    },
+    {
+      "id": "node-tool-faq",
+      "name": "Tool: Consulter FAQ",
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 1.3,
+      "position": [760, 520],
+      "parameters": {
+        "name": "consulter_faq",
+        "description": "Recherche dans la base de connaissance FAQ du cabinet dentaire. Utilise cet outil pour toute question sur les horaires, tarifs, soins, accès, etc. Renvoie les questions/réponses les plus pertinentes.",
+        "workflowId": "={{ $workflow.id }}",
+        "fields": {
+          "values": [
+            {
+              "name": "query",
+              "type": "stringValue",
+              "stringValue": "={{ $fromAI('query', 'La question ou le mot-clé à chercher dans la FAQ', 'string') }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-code-parse",
+      "name": "Code - Extraire Réservation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// === EXTRACTION & NORMALISATION DE LA RÉSERVATION ===\nconst agentOutput = $input.first().json;\nconst fullText = agentOutput.output || agentOutput.text || '';\n\nlet chatResponse = fullText;\nlet hasBooking = false;\nlet booking = null;\nlet bookingStartISO = null;\nlet bookingEndISO = null;\n\n// 1. Extraire le bloc JSON entre ---BOOKING---\nconst match = fullText.match(/---BOOKING---([\\s\\S]*?)---BOOKING---/);\nif (match) {\n  chatResponse = fullText.split('---BOOKING---')[0].trim();\n  try {\n    const data = JSON.parse(match[1].trim());\n    if (data.confirmed === true && data.type && data.date && data.time && data.name) {\n      hasBooking = true;\n      booking = data;\n\n      // 2. Normaliser la date FR vers ISO\n      const moisFR = {janvier:1,fevrier:2,février:2,mars:3,avril:4,mai:5,juin:6,juillet:7,aout:8,août:8,septembre:9,octobre:10,novembre:11,decembre:12,décembre:12};\n      const joursFR = {lundi:1,mardi:2,mercredi:3,jeudi:4,vendredi:5,samedi:6,dimanche:0};\n\n      let dateStr = String(data.date).toLowerCase().trim();\n      let timeStr = String(data.time).toLowerCase().trim().replace('h',':').replace(/[^\\d:]/g,'');\n      if (!timeStr.includes(':')) timeStr = timeStr + ':00';\n      if (timeStr.split(':')[1] === '') timeStr = timeStr + '00';\n      const [hh, mm] = timeStr.split(':').map(Number);\n\n      let target = null;\n\n      // Format JJ/MM/AAAA\n      const dmy = dateStr.match(/(\\d{1,2})[\\/\\-\\.](\\d{1,2})[\\/\\-\\.](\\d{2,4})/);\n      // Format AAAA-MM-JJ\n      const ymd = dateStr.match(/(\\d{4})-(\\d{1,2})-(\\d{1,2})/);\n      // Format \"15 mars\" ou \"15 mars 2026\"\n      const txt = dateStr.match(/(\\d{1,2})\\s+([a-zûéèà]+)(?:\\s+(\\d{4}))?/);\n      // Format jour de semaine\n      const dayName = Object.keys(joursFR).find(j => dateStr.includes(j));\n\n      const now = new Date();\n\n      if (ymd) {\n        target = new Date(+ymd[1], +ymd[2]-1, +ymd[3], hh||9, mm||0);\n      } else if (dmy) {\n        let y = +dmy[3]; if (y < 100) y += 2000;\n        target = new Date(y, +dmy[2]-1, +dmy[1], hh||9, mm||0);\n      } else if (txt && moisFR[txt[2]]) {\n        const y = txt[3] ? +txt[3] : now.getFullYear();\n        target = new Date(y, moisFR[txt[2]]-1, +txt[1], hh||9, mm||0);\n        if (!txt[3] && target < now) target.setFullYear(y+1);\n      } else if (dayName) {\n        const targetDow = joursFR[dayName];\n        target = new Date(now);\n        let diff = (targetDow - now.getDay() + 7) % 7;\n        if (diff === 0) diff = 7;\n        target.setDate(now.getDate() + diff);\n        target.setHours(hh||9, mm||0, 0, 0);\n      }\n\n      if (target && !isNaN(target.getTime())) {\n        bookingStartISO = target.toISOString();\n        const end = new Date(target.getTime() + 60*60*1000);\n        bookingEndISO = end.toISOString();\n      }\n    }\n  } catch(e) {\n    // JSON mal formé, on ignore le booking\n  }\n}\n\nreturn [{\n  json: {\n    output: chatResponse,\n    chatResponse,\n    hasBooking,\n    bookingStartISO,\n    bookingEndISO,\n    bookingType:  booking ? booking.type  : null,\n    bookingDate:  booking ? booking.date  : null,\n    bookingTime:  booking ? booking.time  : null,\n    bookingName:  booking ? booking.name  : null,\n    bookingPhone: booking ? booking.phone : null\n  }\n}];"
+      }
+    },
+    {
+      "id": "node-if-booking",
+      "name": "IF - Réservation Valide",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1100, 300],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.hasBooking }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            },
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.bookingStartISO }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "node-calendar",
+      "name": "Google Calendar - Créer RDV",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [1340, 140],
+      "parameters": {
+        "operation": "create",
+        "calendar": {
+          "__rl": true,
+          "value": "primary",
+          "mode": "list",
+          "cachedResultName": "Calendrier principal"
+        },
+        "start": "={{ $json.bookingStartISO }}",
+        "end": "={{ $json.bookingEndISO }}",
+        "additionalFields": {
+          "summary": "=RDV: {{ $json.bookingType }} - {{ $json.bookingName }}",
+          "description": "=Cabinet Dentaire Évry\nTéléphone: 06-98-70-77-21\nAdresse: 9 Rue Léopold Sédar Senghor, 91000 Évry\n\n👤 Patient: {{ $json.bookingName }}\n📞 Téléphone patient: {{ $json.bookingPhone }}\n🦷 Type: {{ $json.bookingType }}\n\nTransports:\n- RER D: Gare Évry (3 min marche)\n- Tram 12: Évry-Courcouronnes\n- Bus: 4201, 4202, 4206, 4212, 4504\n\n⚠️ Confirmez ou annulez 24h avant.",
+          "colorId": "3"
+        }
+      },
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "GOOGLE_CALENDAR_CREDENTIAL_ID",
+          "name": "Google Calendar account"
+        }
+      }
+    },
+    {
+      "id": "node-gmail",
+      "name": "Gmail - Confirmation Patient",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1340, 320],
+      "parameters": {
+        "operation": "send",
+        "sendTo": "renaissanceitech@gmail.com",
+        "subject": "=✅ Confirmation RDV - {{ $json.bookingType }} - {{ $json.bookingDate }} {{ $json.bookingTime }}",
+        "emailType": "html",
+        "message": "=<!DOCTYPE html><html><head><style>body{font-family:Arial,sans-serif;color:#333;line-height:1.6}.container{max-width:600px;margin:0 auto;padding:20px}.header{background:#2196F3;color:white;padding:20px;border-radius:8px;text-align:center}.content{background:#f9f9f9;padding:25px;margin:20px 0;border-radius:8px;border-left:4px solid #2196F3}.detail-row{margin:12px 0}.detail-label{font-weight:bold;display:inline-block;width:140px}.footer{text-align:center;color:#999;font-size:12px;margin-top:30px;border-top:1px solid #ddd;padding-top:20px}.important{background:#fff3cd;border:1px solid #ffc107;padding:15px;border-radius:5px;margin:15px 0}</style></head><body><div class=\"container\"><div class=\"header\"><h1>✅ Votre rendez-vous est confirmé!</h1></div><div class=\"content\"><p>Bonjour <strong>{{ $json.bookingName }}</strong>,</p><p>Merci d'avoir choisi le Cabinet Dentaire d'Évry! Voici les détails :</p><div class=\"detail-row\"><span class=\"detail-label\">🦷 Type :</span><strong>{{ $json.bookingType }}</strong></div><div class=\"detail-row\"><span class=\"detail-label\">📅 Date :</span><strong>{{ $json.bookingDate }}</strong></div><div class=\"detail-row\"><span class=\"detail-label\">⏰ Heure :</span><strong>{{ $json.bookingTime }}</strong></div><div class=\"detail-row\"><span class=\"detail-label\">📍 Adresse :</span><strong>9 Rue Léopold Sédar Senghor, 91000 Évry</strong></div><div class=\"detail-row\"><span class=\"detail-label\">📞 Téléphone :</span><strong>06-98-70-77-21</strong></div><div class=\"important\"><h3>⚠️ Important :</h3><ul><li>Arrivez <strong>10 min avant</strong> votre RDV</li><li>Annulation : prévenez-nous <strong>24h avant</strong></li><li>Apportez votre <strong>carte d'assurance</strong> et <strong>pièce d'identité</strong></li></ul></div><p>Questions ? Appelez le <strong>06-98-70-77-21</strong></p><p>À très bientôt ! 💚<br><em>L'équipe du Cabinet Dentaire Évry</em></p></div><div class=\"footer\"><p>Cabinet Dentaire Évry | 9 Rue Léopold Sédar Senghor, 91000 Évry | 06-98-70-77-21</p></div></div></body></html>",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "id": "node-slack",
+      "name": "Slack - Notification Équipe",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1340, 500],
+      "parameters": {
+        "operation": "postMessage",
+        "channel": {
+          "__rl": true,
+          "value": "#appointments",
+          "mode": "name"
+        },
+        "text": "=🆕 *NOUVEAU RENDEZ-VOUS PRIS!*\n\n👤 *Patient:* {{ $json.bookingName }}\n📞 *Téléphone:* {{ $json.bookingPhone }}\n🦷 *Type:* {{ $json.bookingType }}\n📅 *Date & Heure:* {{ $json.bookingDate }} à {{ $json.bookingTime }}\n\n✅ Email patient envoyé\n📅 Google Calendar mis à jour",
+        "otherOptions": {
+          "mrkdwn": true
+        }
+      },
+      "credentials": {
+        "slackApi": {
+          "id": "SLACK_CREDENTIAL_ID",
+          "name": "Slack Bot Token"
+        }
+      }
+    },
+    {
+      "id": "node-sub-trigger",
+      "name": "Sub-Workflow Trigger (FAQ Tool)",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 800],
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            { "name": "query", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-sub-sheets",
+      "name": "Google Sheets - FAQ (Sub)",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.4,
-      "position": [460, 300],
+      "position": [460, 800],
       "parameters": {
         "operation": "read",
         "documentId": {
@@ -39,7 +244,6 @@
           "mode": "id",
           "cachedResultName": "Sheet1"
         },
-        "filtersUI": {},
         "options": {}
       },
       "credentials": {
@@ -50,259 +254,52 @@
       }
     },
     {
-      "id": "a1b2c3d4-3333-3333-3333-000000000003",
-      "name": "Code - Formater FAQ",
+      "id": "node-sub-search",
+      "name": "Code - Recherche FAQ",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [680, 300],
+      "position": [680, 800],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// Récupérer toutes les lignes FAQ de Google Sheets\nconst faqItems = $('Google Sheets - Lire FAQ').all();\n\n// Construire le contexte FAQ formaté\nlet faqContext = 'BASE DE DONNÉES FAQ DU CABINET:\\n\\n';\n\nfor (const item of faqItems) {\n  const row = item.json;\n  const categorie = row['Catégorie'] || row['categorie'] || '';\n  const question  = row['Question']  || row['question']  || '';\n  const reponse   = row['Réponse']   || row['reponse']   || '';\n\n  if (categorie && question && reponse) {\n    faqContext += `Catégorie: ${categorie}\\n`;\n    faqContext += `Question: ${question}\\n`;\n    faqContext += `Réponse: ${reponse}\\n\\n`;\n  }\n}\n\nreturn [{ json: { faqContext } }];"
-      }
-    },
-    {
-      "id": "a1b2c3d4-4444-4444-4444-000000000004",
-      "name": "AI Agent",
-      "type": "@n8n/n8n-nodes-langchain.agent",
-      "typeVersion": 1.7,
-      "position": [900, 300],
-      "parameters": {
-        "agent": "conversationalAgent",
-        "promptType": "define",
-        "text": "={{ $('Chat Trigger').item.json.chatInput }}",
-        "hasOutputParser": false,
-        "options": {
-          "systemMessage": "=Tu es un assistant dentaire pour le Cabinet Dentaire à Évry.\n\n📌 CABINET INFO:\n- Téléphone: 06-98-70-77-21\n- Adresse: 9 Rue Léopold Sédar Senghor, 91000 Évry\n- Horaires: Lun-Ven 9h-18h, Sam 9h-12h, Dim Fermé\n- Transports: RER D Gare Évry (3min), Tram 12, Bus 4201/4202/4206/4212/4504\n\n🎯 JOB:\n1. Réponds aux questions en utilisant UNIQUEMENT la base de données ci-dessous\n2. Si patient dit \"mal/urgence/douleur\" → réponds UNIQUEMENT: \"Appelez 06-98-70-77-21 IMMÉDIATEMENT\"\n3. Si patient veut un RDV → pose ces 3 questions une par une:\n   Q1: \"Quel type de visite?\" (détartrage / urgence / implant / blanchiment / consultation)\n   Q2: \"Quel jour et heure?\"\n   Q3: \"Votre nom et téléphone?\"\n4. Quand tu as les 3 réponses, confirme: \"Parfait! RDV [TYPE] le [JOUR] à [HEURE] confirmé!\"\n\nRÈGLES:\n- Max 150 mots par réponse\n- Français naturel, jamais robotique\n- JAMAIS inventer d'infos\n- Si pas sûr: \"Je vais vérifier\"\n- Sois empathique et professionnel\n\nFORMAT DE RÉPONSE OBLIGATOIRE:\nTermine TOUJOURS ta réponse avec ce bloc (mettre null si pas de RDV):\n\n---BOOKING---\ntype: [type de visite ou null]\ndate: [date mentionnée ou null]\ntime: [heure mentionnée ou null]\nname: [nom patient ou null]\nphone: [téléphone patient ou null]\n---BOOKING---\n\n{{ $('Code - Formater FAQ').item.json.faqContext }}"
-        }
-      }
-    },
-    {
-      "id": "a1b2c3d4-4444-4444-AAAA-000000000010",
-      "name": "Anthropic Chat Model",
-      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
-      "typeVersion": 1.3,
-      "position": [900, 520],
-      "parameters": {
-        "model": "claude-3-5-sonnet-20241022",
-        "options": {
-          "temperature": 0.7,
-          "maxTokens": 500
-        }
-      },
-      "credentials": {
-        "anthropicApi": {
-          "id": "ANTHROPIC_CREDENTIAL_ID",
-          "name": "Anthropic account"
-        }
-      }
-    },
-    {
-      "id": "a1b2c3d4-5555-5555-5555-000000000005",
-      "name": "Code - Extraire Réservation",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [1120, 300],
-      "parameters": {
-        "mode": "runOnceForAllItems",
-        "jsCode": "// Récupérer la sortie de l'AI Agent\nconst agentOutput = $input.first().json;\n\n// L'AI Agent retourne le texte dans 'output'\nconst fullText = agentOutput.output || agentOutput.text || JSON.stringify(agentOutput);\n\n// Séparer la réponse naturelle du bloc BOOKING\nlet chatResponse = fullText;\nlet hasBooking = false;\nlet booking = null;\n\n// Regex pour extraire le bloc ---BOOKING---\nconst bookingMatch = fullText.match(/---BOOKING---([\\s\\S]*?)---BOOKING---/);\n\nif (bookingMatch) {\n  // Réponse texte = tout avant le premier ---BOOKING---\n  chatResponse = fullText.split('---BOOKING---')[0].trim();\n  const bookingText = bookingMatch[1];\n\n  const typeMatch  = bookingText.match(/type:\\s*(.+)/);\n  const dateMatch  = bookingText.match(/date:\\s*(.+)/);\n  const timeMatch  = bookingText.match(/time:\\s*(.+)/);\n  const nameMatch  = bookingText.match(/name:\\s*(.+)/);\n  const phoneMatch = bookingText.match(/phone:\\s*(.+)/);\n\n  const bookingType = typeMatch ? typeMatch[1].trim() : 'null';\n\n  if (bookingType && bookingType.toLowerCase() !== 'null' && bookingType !== '') {\n    hasBooking = true;\n    booking = {\n      type:  bookingType,\n      date:  dateMatch  ? dateMatch[1].trim()  : '',\n      time:  timeMatch  ? timeMatch[1].trim()  : '',\n      name:  nameMatch  ? nameMatch[1].trim()  : 'Patient',\n      phone: phoneMatch ? phoneMatch[1].trim() : 'Non renseigné'\n    };\n  }\n}\n\nreturn [\n  {\n    json: {\n      output: chatResponse,\n      chatResponse,\n      hasBooking,\n      booking,\n      bookingType:  booking ? booking.type  : null,\n      bookingDate:  booking ? booking.date  : null,\n      bookingTime:  booking ? booking.time  : null,\n      bookingName:  booking ? booking.name  : null,\n      bookingPhone: booking ? booking.phone : null\n    }\n  }\n];"
-      }
-    },
-    {
-      "id": "a1b2c3d4-6666-6666-6666-000000000006",
-      "name": "IF - Réservation Détectée",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2,
-      "position": [1340, 300],
-      "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict"
-          },
-          "conditions": [
-            {
-              "id": "condition-booking",
-              "leftValue": "={{ $json.hasBooking }}",
-              "rightValue": true,
-              "operator": {
-                "type": "boolean",
-                "operation": "equals"
-              }
-            }
-          ],
-          "combinator": "and"
-        },
-        "options": {}
-      }
-    },
-    {
-      "id": "a1b2c3d4-7777-7777-7777-000000000007",
-      "name": "Google Calendar - Créer RDV",
-      "type": "n8n-nodes-base.googleCalendar",
-      "typeVersion": 1.3,
-      "position": [1560, 140],
-      "parameters": {
-        "operation": "create",
-        "calendar": {
-          "__rl": true,
-          "value": "primary",
-          "mode": "list",
-          "cachedResultName": "Calendrier principal"
-        },
-        "start": "={{ $json.bookingDate + ' ' + $json.bookingTime }}",
-        "end": "={{ $json.bookingDate + ' ' + $json.bookingTime }}",
-        "additionalFields": {
-          "summary": "=RDV: {{ $json.bookingType }} - {{ $json.bookingName }}",
-          "description": "=Cabinet Dentaire Évry\nTéléphone: 06-98-70-77-21\nAdresse: 9 Rue Léopold Sédar Senghor, 91000 Évry\n\n👤 Patient: {{ $json.bookingName }}\n📞 Téléphone patient: {{ $json.bookingPhone }}\n🦷 Type: {{ $json.bookingType }}\n\nTransports:\n- RER D: Gare Évry (3 min marche)\n- Tram 12: Arrêt Évry-Courcouronnes\n- Bus: 4201, 4202, 4206, 4212, 4504\n\n⚠️ Confirmez ou annulez 24h avant.\nApportez votre assurance et pièce d'identité.",
-          "colorId": "3",
-          "guestsCanInviteOthers": false,
-          "guestsCanSeeOtherGuests": false
-        }
-      },
-      "credentials": {
-        "googleCalendarOAuth2Api": {
-          "id": "GOOGLE_CALENDAR_CREDENTIAL_ID",
-          "name": "Google Calendar account"
-        }
-      }
-    },
-    {
-      "id": "a1b2c3d4-8888-8888-8888-000000000008",
-      "name": "Gmail - Confirmation Patient",
-      "type": "n8n-nodes-base.gmail",
-      "typeVersion": 2.1,
-      "position": [1560, 320],
-      "parameters": {
-        "operation": "send",
-        "sendTo": "renaissanceitech@gmail.com",
-        "subject": "=✅ Confirmation RDV - {{ $json.bookingType }} - {{ $json.bookingDate }} {{ $json.bookingTime }}",
-        "emailType": "html",
-        "message": "=<!DOCTYPE html>\n<html>\n<head>\n  <style>\n    body { font-family: Arial, sans-serif; color: #333; line-height: 1.6; }\n    .container { max-width: 600px; margin: 0 auto; padding: 20px; }\n    .header { background: #2196F3; color: white; padding: 20px; border-radius: 8px; text-align: center; }\n    .content { background: #f9f9f9; padding: 25px; margin: 20px 0; border-radius: 8px; border-left: 4px solid #2196F3; }\n    .detail-row { margin: 12px 0; display: flex; align-items: flex-start; }\n    .detail-label { font-weight: bold; width: 150px; flex-shrink: 0; }\n    .footer { text-align: center; color: #999; font-size: 12px; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 20px; }\n    .important { background: #fff3cd; border: 1px solid #ffc107; padding: 15px; border-radius: 5px; margin: 15px 0; }\n  </style>\n</head>\n<body>\n  <div class=\"container\">\n    <div class=\"header\"><h1>✅ Votre rendez-vous est confirmé!</h1></div>\n    <div class=\"content\">\n      <p>Bonjour <strong>{{ $json.bookingName }}</strong>,</p>\n      <p>Merci d'avoir choisi le Cabinet Dentaire d'Évry! Voici les détails:</p>\n      <div class=\"detail-row\"><span class=\"detail-label\">🦷 Type:</span><span><strong>{{ $json.bookingType }}</strong></span></div>\n      <div class=\"detail-row\"><span class=\"detail-label\">📅 Date:</span><span><strong>{{ $json.bookingDate }}</strong></span></div>\n      <div class=\"detail-row\"><span class=\"detail-label\">⏰ Heure:</span><span><strong>{{ $json.bookingTime }}</strong></span></div>\n      <div class=\"detail-row\"><span class=\"detail-label\">📍 Adresse:</span><span><strong>9 Rue Léopold Sédar Senghor<br>91000 Évry</strong></span></div>\n      <div class=\"detail-row\"><span class=\"detail-label\">📞 Téléphone:</span><span><strong>06-98-70-77-21</strong></span></div>\n      <div class=\"detail-row\"><span class=\"detail-label\">🚌 Accès:</span><span><strong>RER D: Gare Évry (3 min)<br>Tram 12: Évry-Courcouronnes<br>Bus: 4201, 4202, 4206, 4212, 4504</strong></span></div>\n      <div class=\"important\">\n        <h3>⚠️ Important:</h3>\n        <ul>\n          <li>Arrivez <strong>10 minutes avant</strong> votre RDV</li>\n          <li>Annulation: prévenez-nous <strong>24h avant</strong></li>\n          <li>Apportez votre <strong>carte d'assurance</strong></li>\n          <li>Apportez votre <strong>pièce d'identité</strong></li>\n        </ul>\n      </div>\n      <p>Questions? Appelez le <strong>06-98-70-77-21</strong></p>\n      <p>À très bientôt! 💚<br><em>L'équipe du Cabinet Dentaire Évry</em></p>\n    </div>\n    <div class=\"footer\">\n      <p>Cabinet Dentaire Évry | 9 Rue Léopold Sédar Senghor, 91000 Évry</p>\n      <p>Téléphone: 06-98-70-77-21 | © 2024 Cabinet Dentaire. Tous droits réservés.</p>\n    </div>\n  </div>\n</body>\n</html>",
-        "options": {}
-      },
-      "credentials": {
-        "gmailOAuth2": {
-          "id": "GMAIL_CREDENTIAL_ID",
-          "name": "Gmail account (renaissanceitech@gmail.com)"
-        }
-      }
-    },
-    {
-      "id": "a1b2c3d4-9999-9999-9999-000000000009",
-      "name": "Slack - Notification Équipe",
-      "type": "n8n-nodes-base.slack",
-      "typeVersion": 2.2,
-      "position": [1560, 500],
-      "parameters": {
-        "operation": "postMessage",
-        "channel": {
-          "__rl": true,
-          "value": "#appointments",
-          "mode": "name"
-        },
-        "text": "=🆕 *NOUVEAU RENDEZ-VOUS PRIS!*\n\n👤 *Patient:* {{ $json.bookingName }}\n📞 *Téléphone:* {{ $json.bookingPhone }}\n\n🦷 *Type de visite:* {{ $json.bookingType }}\n📅 *Date & Heure:* {{ $json.bookingDate }} {{ $json.bookingTime }}\n\n📍 *Cabinet:* 9 Rue Léopold Sédar Senghor, 91000 Évry\n\n✅ Confirmation email envoyée au patient\n📅 Événement Google Calendar créé\n\nÀ bientôt! 🦷",
-        "otherOptions": {
-          "mrkdwn": true
-        }
-      },
-      "credentials": {
-        "slackApi": {
-          "id": "SLACK_CREDENTIAL_ID",
-          "name": "Slack Bot Token"
-        }
+        "jsCode": "// Recherche fuzzy dans la FAQ\nconst query = ($('Sub-Workflow Trigger (FAQ Tool)').first().json.query || '').toLowerCase();\nconst rows = $input.all();\n\nconst norm = s => String(s||'').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'');\nconst q = norm(query);\nconst keywords = q.split(/\\s+/).filter(w => w.length > 2);\n\nconst scored = rows.map(r => {\n  const text = norm(`${r.json['Catégorie']||''} ${r.json['Question']||''} ${r.json['Réponse']||''}`);\n  let score = 0;\n  for (const k of keywords) if (text.includes(k)) score++;\n  return { row: r.json, score };\n}).filter(x => x.score > 0).sort((a,b) => b.score - a.score).slice(0, 5);\n\nconst results = scored.length > 0 ? scored.map(s => s.row) : rows.slice(0,5).map(r => r.json);\n\nconst formatted = results.map(r => `[${r['Catégorie']||''}] Q: ${r['Question']||''}\\nR: ${r['Réponse']||''}`).join('\\n\\n');\n\nreturn [{ json: { response: formatted || 'Aucun résultat dans la FAQ.' } }];"
       }
     }
   ],
   "pinData": {},
   "connections": {
     "Chat Trigger": {
-      "main": [
-        [
-          {
-            "node": "Google Sheets - Lire FAQ",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Google Sheets - Lire FAQ": {
-      "main": [
-        [
-          {
-            "node": "Code - Formater FAQ",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Code - Formater FAQ": {
-      "main": [
-        [
-          {
-            "node": "AI Agent",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+      "main": [[{ "node": "AI Agent", "type": "main", "index": 0 }]]
     },
     "Anthropic Chat Model": {
-      "ai_languageModel": [
-        [
-          {
-            "node": "AI Agent",
-            "type": "ai_languageModel",
-            "index": 0
-          }
-        ]
-      ]
+      "ai_languageModel": [[{ "node": "AI Agent", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "Memory (Conversation)": {
+      "ai_memory": [[{ "node": "AI Agent", "type": "ai_memory", "index": 0 }]]
+    },
+    "Tool: Consulter FAQ": {
+      "ai_tool": [[{ "node": "AI Agent", "type": "ai_tool", "index": 0 }]]
     },
     "AI Agent": {
-      "main": [
-        [
-          {
-            "node": "Code - Extraire Réservation",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+      "main": [[{ "node": "Code - Extraire Réservation", "type": "main", "index": 0 }]]
     },
     "Code - Extraire Réservation": {
-      "main": [
-        [
-          {
-            "node": "IF - Réservation Détectée",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+      "main": [[{ "node": "IF - Réservation Valide", "type": "main", "index": 0 }]]
     },
-    "IF - Réservation Détectée": {
+    "IF - Réservation Valide": {
       "main": [
         [
-          {
-            "node": "Google Calendar - Créer RDV",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Gmail - Confirmation Patient",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Slack - Notification Équipe",
-            "type": "main",
-            "index": 0
-          }
+          { "node": "Google Calendar - Créer RDV", "type": "main", "index": 0 },
+          { "node": "Gmail - Confirmation Patient", "type": "main", "index": 0 },
+          { "node": "Slack - Notification Équipe", "type": "main", "index": 0 }
         ],
         []
       ]
+    },
+    "Sub-Workflow Trigger (FAQ Tool)": {
+      "main": [[{ "node": "Google Sheets - FAQ (Sub)", "type": "main", "index": 0 }]]
+    },
+    "Google Sheets - FAQ (Sub)": {
+      "main": [[{ "node": "Code - Recherche FAQ", "type": "main", "index": 0 }]]
     }
   },
   "active": false,
@@ -311,16 +308,13 @@
     "saveManualExecutions": true,
     "callerPolicy": "workflowsFromSameOwner"
   },
-  "versionId": "2.0.0",
+  "versionId": "3.0.0",
   "meta": {
     "templateCredsSetupCompleted": false,
     "instanceId": "cabinet-dentaire-evry"
   },
   "id": "cabinet-dentaire-chatbot-evry",
   "tags": [
-    {
-      "id": "tag-cabinet-dentaire",
-      "name": "Cabinet Dentaire"
-    }
+    { "id": "tag-cabinet-dentaire", "name": "Cabinet Dentaire" }
   ]
 }
